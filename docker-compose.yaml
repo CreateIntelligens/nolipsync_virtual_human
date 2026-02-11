@@ -1,0 +1,33 @@
+services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: hana-frontend-exhibition-nolipsync
+    ports:
+      - "3006:3006"
+    restart: always
+    depends_on:
+      - backend
+    networks:
+      - app-network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: hana-backend-exhibition
+    ports:
+      - "3566:3566"
+    restart: always
+    volumes:
+      - ./backend:/app
+    environment:
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/wonderland-nft-5072ee803fcd.json
+
+    networks:
+      - app-network
+
+networks:
+  app-network:
+    driver: bridge

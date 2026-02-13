@@ -21,4 +21,5 @@ COPY . .
 EXPOSE 3566
 
 # 啟動命令
-CMD ["uvicorn", "unified_api:app", "--host", "0.0.0.0", "--port", "3566"]
+# 使用 --workers 增加並發處理能力，建議值為 (2 x CPU核心數) + 1
+CMD ["uvicorn", "unified_api:app", "--host", "0.0.0.0", "--port", "3566", "--workers", "8"]

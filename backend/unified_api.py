@@ -12,7 +12,7 @@ from google.cloud import speech
 from datetime import datetime
 import edge_tts
 import opencc
-import requests
+import httpx
 import json
 import os
 import re
@@ -22,6 +22,13 @@ import asyncio
 
 # 初始化
 app = FastAPI(title="MaxGut Unified API Service")
+
+# 全域 AsyncClient
+async_client = httpx.AsyncClient(timeout=30.0, verify=False)
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    await async_client.aclose()
 
 # CORS 設定
 app.add_middleware(
@@ -191,8 +198,18 @@ async def transcribe_zh(
             input_text += result.alternatives[0].transcript
         
         # 應用文字修正
-        input_text = apply_text_corrections(input_text)
+        input_text = apply_text_corrections(input_text).strip()
         
+        # 【關鍵優化】如果識別出的文字太短或為空，不觸發 AI，直接返回
+        if not input_text or len(input_text) < 1:
+            print(f"[{datetime.now()}] 識別結果為空，不觸發 AI。")
+            return JSONResponse({
+                "input_text": "",
+                "text": "",
+                "conversation_id": conversation_id,
+                "status": "empty"
+            })
+
         print(f"[{datetime.now()}] 轉錄完成: {input_text}")
         
         # 呼叫 AI 聊天 API
@@ -204,15 +221,18 @@ async def transcribe_zh(
         }
         
         print(f"[{datetime.now()}] 呼叫 AI 聊天機器人...")
-        ai_response = requests.post(ai_url, json=ai_payload, verify=False)
-        ai_response_json = ai_response.json()
-        
-        # 提取 AI 訊息
-        ai_messages = [msg for msg in ai_response_json['messages'] if msg['type'] == 'ai']
-        if ai_messages:
-            message = ai_messages[-1]['content']
-        else:
-            message = "抱歉，我無法理解您的問題。"
+        try:
+            ai_response = await async_client.post(ai_url, json=ai_payload)
+            if ai_response.status_code != 200:
+                print(f"[{datetime.now()}] AI 伺服器回傳錯誤代碼: {ai_response.status_code}")
+                message = "抱歉，系統目前忙碌中，請稍後再試。"
+            else:
+                ai_response_json = ai_response.json()
+                ai_messages = [msg for msg in ai_response_json['messages'] if msg['type'] == 'ai']
+                message = ai_messages[-1]['content'] if ai_messages else "抱歉，我無法理解您的問題。"
+        except Exception as ai_err:
+            print(f"[{datetime.now()}] 呼叫 AI 失敗: {str(ai_err)}")
+            message = "抱歉，我現在有點不舒服，請再對我說一次。"
         
         # 應用文字修正和替換
         message = apply_text_corrections(message)
@@ -221,7 +241,8 @@ async def transcribe_zh(
         return JSONResponse({
             "input_text": converter.convert(input_text),
             "text": converter.convert(message),
-            "conversation_id": conversation_id
+            "conversation_id": conversation_id,
+            "status": "success"
         })
         
     except Exception as e:
@@ -272,11 +293,21 @@ async def transcribe_en(
             input_text += result.alternatives[0].transcript
         
         # 應用文字修正
-        input_text = apply_text_corrections(input_text)
+        input_text = apply_text_corrections(input_text).strip()
         
+        # 【關鍵優化】空內容判斷
+        if not input_text or len(input_text) < 1:
+            print(f"[{datetime.now()}] English recognition result is empty.")
+            return JSONResponse({
+                "input_text": "",
+                "text": "",
+                "conversation_id": conversation_id,
+                "status": "empty"
+            })
+
         print(f"[{datetime.now()}] 轉錄完成: {input_text}")
         
-        # 呼叫英文 AI 聊天 API（可以在這裡調整）
+        # 呼叫英文 AI 聊天 API
         ai_url = "https://ddgsrvchat.aicreate360.com/custom_service_with_language?language=english"
         headers = {
             "Content-Type": "application/json",
@@ -296,9 +327,17 @@ async def transcribe_en(
         }
         
         print(f"[{datetime.now()}] 呼叫 AI 聊天機器人...")
-        ai_response = requests.post(ai_url, headers=headers, json=ai_payload)
-        ai_response_json = ai_response.json()
-        message = ai_response_json['message']
+        try:
+            ai_response = await async_client.post(ai_url, headers=headers, json=ai_payload)
+            if ai_response.status_code != 200:
+                print(f"[{datetime.now()}] AI 伺服器回傳錯誤代碼: {ai_response.status_code}")
+                message = "Sorry, the system is busy. Please try again later."
+            else:
+                ai_response_json = ai_response.json()
+                message = ai_response_json.get('message', "I couldn't understand that.")
+        except Exception as ai_err:
+            print(f"[{datetime.now()}] 呼叫 AI 失敗: {str(ai_err)}")
+            message = "Sorry, I am having some trouble. Please talk to me again."
         
         # 應用文字修正
         message = apply_text_corrections(message)
@@ -306,7 +345,8 @@ async def transcribe_en(
         return JSONResponse({
             "input_text": converter.convert(input_text),
             "text": converter.convert(message),
-            "conversation_id": conversation_id
+            "conversation_id": conversation_id,
+            "status": "success"
         })
         
     except Exception as e:
@@ -320,8 +360,16 @@ async def ai_chat_zh(request: TextChatRequest):
     try:
         print(f"[{datetime.now()}] 中文文字對話: {request.text}")
         
-        converted_input = converter.convert(request.text)
+        converted_input = converter.convert(request.text).strip()
         
+        if not converted_input:
+            return JSONResponse({
+                "input_text": "",
+                "text": "",
+                "conversation_id": request.conversation_id,
+                "status": "empty"
+            })
+
         # 呼叫 AI 聊天 API
         ai_url = "https://cs01-line.ai360.workers.dev/api/chat"
         ai_payload = {
@@ -330,15 +378,18 @@ async def ai_chat_zh(request: TextChatRequest):
             "notebook_id": "notebook:47rayc7fhfiower8b918"
         }
         
-        ai_response = requests.post(ai_url, json=ai_payload, verify=False)
-        ai_response_json = ai_response.json()
-        
-        # 提取 AI 訊息
-        ai_messages = [msg for msg in ai_response_json['messages'] if msg['type'] == 'ai']
-        if ai_messages:
-            message = ai_messages[-1]['content']
-        else:
-            message = "抱歉，我無法理解您的問題。"
+        try:
+            ai_response = await async_client.post(ai_url, json=ai_payload)
+            if ai_response.status_code != 200:
+                print(f"[{datetime.now()}] AI 伺服器回傳錯誤代碼: {ai_response.status_code}")
+                message = "抱歉，系統目前忙碌中，請稍後再試。"
+            else:
+                ai_response_json = ai_response.json()
+                ai_messages = [msg for msg in ai_response_json['messages'] if msg['type'] == 'ai']
+                message = ai_messages[-1]['content'] if ai_messages else "抱歉，我無法理解您的問題。"
+        except Exception as ai_err:
+            print(f"[{datetime.now()}] 呼叫 AI 失敗: {str(ai_err)}")
+            message = "抱歉，我現在有點不舒服，請再對我說一次。"
         
         # 應用文字修正和替換
         message = apply_text_corrections(message)
@@ -347,7 +398,8 @@ async def ai_chat_zh(request: TextChatRequest):
         return JSONResponse({
             "input_text": converter.convert(request.text),
             "text": converter.convert(message),
-            "conversation_id": request.conversation_id
+            "conversation_id": request.conversation_id,
+            "status": "success"
         })
         
     except Exception as e:
@@ -361,8 +413,16 @@ async def ai_chat_en(request: TextChatRequest):
     try:
         print(f"[{datetime.now()}] 英文文字對話: {request.text}")
         
-        converted_input = converter.convert(request.text)
+        converted_input = converter.convert(request.text).strip()
         
+        if not converted_input:
+            return JSONResponse({
+                "input_text": "",
+                "text": "",
+                "conversation_id": request.conversation_id,
+                "status": "empty"
+            })
+
         # 呼叫英文 AI 聊天 API
         ai_url = "https://ddgsrvchat.aicreate360.com/custom_service_with_language?language=english"
         headers = {
@@ -382,9 +442,17 @@ async def ai_chat_en(request: TextChatRequest):
             }
         }
         
-        ai_response = requests.post(ai_url, headers=headers, json=ai_payload)
-        ai_response_json = ai_response.json()
-        message = ai_response_json['message']
+        try:
+            ai_response = await async_client.post(ai_url, headers=headers, json=ai_payload)
+            if ai_response.status_code != 200:
+                print(f"[{datetime.now()}] AI 伺服器回傳錯誤代碼: {ai_response.status_code}")
+                message = "Sorry, the system is busy. Please try again later."
+            else:
+                ai_response_json = ai_response.json()
+                message = ai_response_json.get('message', "I couldn't understand that.")
+        except Exception as ai_err:
+            print(f"[{datetime.now()}] 呼叫 AI 失敗: {str(ai_err)}")
+            message = "Sorry, I am having some trouble. Please talk to me again."
         
         # 應用文字修正
         message = apply_text_corrections(message)
@@ -392,7 +460,8 @@ async def ai_chat_en(request: TextChatRequest):
         return JSONResponse({
             "input_text": converter.convert(request.text),
             "text": converter.convert(message),
-            "conversation_id": request.conversation_id
+            "conversation_id": request.conversation_id,
+            "status": "success"
         })
         
     except Exception as e:
@@ -404,16 +473,6 @@ async def ai_chat_en(request: TextChatRequest):
 async def text_to_speech(request: TTSRequest):
     """
     將文字轉換為語音並返回完整的音檔
-    
-    參數:
-    - text: 要轉換的文字
-    - voice: 語音名稱(預設: zh-TW-HsiaoChenNeural)
-    - rate: 語速調整(預設: +0%)
-    - volume: 音量調整(預設: +0%)
-    - pitch: 音調調整(預設: +0Hz)
-    - format: 音檔格式(預設: mp3, 可選: wav)
-    
-    返回: MP3 或 WAV 音檔
     """
     try:
         print(f'[{datetime.now()}] TTS Request - Text: {request.text[:50]}..., Voice: {request.voice}, Format: {request.format}')
@@ -421,14 +480,10 @@ async def text_to_speech(request: TTSRequest):
         # 應用文字替換規則
         processed_text = apply_text_replacements(request.text)
         
-        # 根據格式選擇不同的輸出格式
-        # EdgeTTS 支援的格式: audio-24khz-48kbitrate-mono-mp3, audio-24khz-48khz-mono-pcm (WAV)
         if request.format.lower() == "wav":
-            output_format = "audio-24khz-48khz-mono-pcm"
             media_type = "audio/wav"
             filename = "speech.wav"
         else:
-            output_format = "audio-24khz-48kbitrate-mono-mp3"
             media_type = "audio/mpeg"
             filename = "speech.mp3"
         

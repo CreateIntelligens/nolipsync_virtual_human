@@ -92,6 +92,7 @@ venv.bak/
 # 敏感資料 (Google Cloud 憑證等)
 # ===========================
 backend/wonderland-nft-5072ee803fcd.json
+openapi0213.json
 
 # ===========================
 # Docker
